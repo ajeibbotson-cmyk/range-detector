@@ -5,14 +5,14 @@ This file dumps everything Claude needs to pick up where the previous session le
 ## TL;DR State on Pause (2026-05-07)
 
 - **Symbol/timeframe**: PEPPERSTONE:US500 1hr
-- **Current files in this repo**: `indicator.pine` (latest live logic v13), `strategy.pine` (needs update to match indicator), `trace.py` (offline Python trace tool)
+- **Current files in this repo**: `indicator.pine` (latest live logic v14-MTF), `strategy.pine` (needs update to match indicator), `trace.py` (offline Python trace tool)
 - **TradingView cloud script names**:
   - Indicator: `Impulsive Break & Retracement v1 CC 0505` (title shown as "Range Detector")
   - Strategy: `Range Detector Strategy`
-- **What works**: HH/HL/LL/LH classification with confirmation gating; continuation breaks; flip breaks; range-box drawing with active-vs-historical fade; fractal markers locked to actual prices via `location.absolute`; configurable `minPivotPct` threshold (now **0.20%**) for HH/LL classification; **counter-flip refs** prevent indicator from getting permanently stuck in one bias. May 4-6 structural sequence verified correct: BER→BUL flip→BUL [7283.4, 7299.1]→BUL [7306.9, 7344.0].
-- **What changed this session (v13)**: Two fixes applied together: (1) `minPivotPct` raised from 0.15% to 0.20% — prevents FH at 7239.3 from qualifying as HH (13pts < 14.5pt threshold), eliminating false micro-range cascade and false BER flips in the May 5-6 rally. (2) **flip-lock removed** — `flipHH_lock`/`flipLL_lock` and the seeding of `current_HH_p`/`current_LL_p` from the flip level were removed entirely. After a flip, the indicator now waits for genuine HH/LL fractals to form before firing continuation breaks. This fixed the inverted box problem where rHi < rLo after a flip (e.g., the BUL box at 7283.4 was showing [7248.8, 7283.4] instead of [7283.4, 7299.1]).
-- **What needs re-verification**: The April 29 bear continuation area changed because flipLL_lock was also removed. The old `[7144.6, 7162.7]` bear box is no longer present — bear breaks there are now at different levels (7152.1, 7119.5). Needs user review during day-by-day walkthrough.
-- **What's still noisy**: Indicator produces 503 breaks across full history — still too many intermediate breaks. Day-by-day walkthrough with the user is still needed to calibrate.
+- **What works**: HH/HL/LL/LH classification with confirmation gating; continuation breaks; flip breaks; range-box drawing with active-vs-historical fade; fractal markers locked to actual prices via `location.absolute`; configurable `minPivotPct` threshold (now **0.20%**) for HH/LL classification; **counter-flip refs** prevent indicator from getting permanently stuck in one bias; **multi-timeframe support** — 1hr ranges persist on 5m/1m charts via `request.security()` with `xloc.bar_time` drawings. User confirmed MTF working correctly.
+- **What changed this session (v14-MTF)**: Refactored indicator for multi-timeframe support. (1) Added `htfInput` timeframe input (default "60") so analysis always runs on the chosen HTF. (2) Extracted entire algorithm into `calcRanges()` function — all 23 `var` state variables moved inside, all `bar_index` references converted to `time[]` for HTF/LTF compatibility. (3) Algorithm called via `request.security(syminfo.tickerid, htfInput, calcRanges(...), barmerge.gaps_off, barmerge.lookahead_on)` returning 9-value tuple. (4) Break deduplication via `lastProcessedBreakTime` to prevent repeated drawings from forward-filled HTF data. (5) All drawings converted to `xloc.bar_time`. (6) Fractal markers gated to only show when chart TF >= analysis TF. (7) Info table shows TF row with warning if chart TF > analysis TF. (8) Removed all `log.info()` instrumentation. **Pine gotcha discovered**: tuple destructuring `[...] = request.security(...)` must be on ONE line — line breaks between `] =` and `request.security(` cause a syntax error.
+- **What needs re-verification**: The April 29 bear continuation area changed in v13 because flipLL_lock was removed. The old `[7144.6, 7162.7]` bear box is gone — bear breaks there are at different levels. Needs user review during day-by-day walkthrough.
+- **What's still noisy**: Indicator produces ~500 breaks across full history — still too many intermediate breaks. Day-by-day walkthrough with the user is still needed to calibrate.
 - **Chart rendering note**: With 500 drawing objects spanning 4700-7300+, the Y-axis gets compressed. User may need to re-pin indicator to price scale. Consider reducing drawing limits.
 - **Next step**: Re-verify April 29 area with user. Then continue day-by-day walkthrough to reduce noise.
 
@@ -125,6 +125,7 @@ We went through these incarnations:
     - **flip-lock removed entirely**: `flipHH_lock`/`flipLL_lock` variables and all associated logic deleted. After a flip, the code no longer seeds `current_HH_p`/`current_LL_p` from the flip level. Instead, it waits for genuine HH/LL fractals to form before the first continuation break can fire. This fixed the inverted box problem: previously, after a bull flip, `current_HH_p` was seeded at the flip level (7248.8) and locked. The first fractal low (7283.4, which was ABOVE 7248.8) triggered a premature HH break with `rHi=7248.8, rLo=7283.4` — an inverted range. With the lock removed, the first real HH fractal (7299.1) sets `current_HH_p`, then the HL fractal (7283.4) sets `candidate_HL_p`, and the break fires correctly with `[7283.4, 7299.1]`.
     - **Verified**: May 4-6 sequence matches user's expected structure. BUL box [7283.4, 7299.1] correct. No false BER labels in rally. BUL [7306.9, 7344.0] correct.
     - **Side effect**: April 29 area changed — old bear continuation `[7144.6, 7162.7]` no longer present. Bear breaks there moved to different levels. Needs re-verification. Live in this repo.
+15. **v14-MTF (multi-timeframe support)**: Refactored for MTF. Algorithm extracted into `calcRanges()` function, called via `request.security()` with configurable `htfInput` (default "60"). All `bar_index` references inside the function converted to `time[]`. Drawings use `xloc.bar_time` so 1hr range boxes/midline/labels persist on 5m and 1m charts. Break deduplication prevents repeated drawings from forward-filled HTF data. Fractal markers gated to chart TF >= analysis TF. `log.info()` instrumentation removed. Info table shows analysis TF. User confirmed working on 5m chart. Live in this repo.
 
 ## Other things we discovered
 
@@ -136,6 +137,8 @@ We went through these incarnations:
 - Pine line continuations need to be indented (>= 1 space). Otherwise the parser treats the broken line as a new statement.
 - `pine_smart_compile` (MCP tool) clicks "Pine Save" — saves the script but doesn't auto-add to chart. To add: open script in editor, click "Add to chart" UI button.
 - After `pine_set_source`, the on-chart instance auto-refreshes if it's bound to the same script ID. If not, remove + re-add.
+- **Tuple destructuring + `request.security()` must be on ONE line**: `[a, b, c] = request.security(...)` compiles, but splitting across two lines (`[a, b, c] =\n    request.security(...)`) causes "Syntax error at input {value}". This is a Pine parser limitation — no implicit line continuation for tuple destructuring assignments.
+- `request.security()` with `barmerge.lookahead_on` places HTF data at the correct historical bar (avoids 1-bar delay on historical data). Acceptable for structural levels — not for trade signals.
 
 ### TV chart UX gotcha (took an hour to find)
 - If indicator drawings appear "detached" from price action (don't move when chart pans/zooms), the indicator is on the **wrong scale** in TV. Right-click indicator → Pin to Scale → Right (or whichever axis the price uses). Per the user: *"fixed, needed to default to pin to scale"*. Not a script issue.
@@ -155,9 +158,7 @@ We went through these incarnations:
 
 3. **Chart scale/rendering issue**: With 500 boxes/labels/lines spanning the full price range (4700 to 7300+), the chart Y-axis gets compressed. The user may need to re-pin the indicator to the price scale. Consider reducing `max_boxes_count`/`max_labels_count`/`max_lines_count` or adding a lookback limit that deletes drawings older than N bars.
 
-4. **Remove log.info() instrumentation**: The indicator still has `log.info()` calls throughout for debugging. These should be removed once calibration is complete, to keep the code clean and avoid hitting Pine's log limits.
-
-5. **Strategy validation**: Once indicator's break detection is user-approved, update `strategy.pine` to mirror the v13 indicator logic (no flip-lock, 0.20% threshold, counter-flip refs), then run in TV strategy tester.
+4. **Strategy validation**: Once indicator's break detection is user-approved, update `strategy.pine` to mirror the v14-MTF indicator logic (no flip-lock, 0.20% threshold, counter-flip refs, MTF support), then run in TV strategy tester.
 
 6. **Possible refinement: fractal filter**: Consider whether a longer-period fractal (7-bar or 9-bar) or ZigZag-style minimum-percent filter would reduce noise. Defer until after day-by-day walkthrough.
 
@@ -171,7 +172,7 @@ We went through these incarnations:
 4. Re-verify April 29 area with user — v13 changed bear breaks there (old `[7144.6, 7162.7]` is gone, new levels at 7152.1, 7119.5). User needs to confirm acceptability.
 5. Begin day-by-day walkthrough: user marks which fractals are structural vs internal at each step, code gets calibrated to match.
 6. Consider reducing drawing limits or adding lookback pruning if chart rendering is problematic.
-7. Update `strategy.pine` to match v13 indicator logic once indicator is user-approved.
+7. Update `strategy.pine` to match v14-MTF indicator logic once indicator is user-approved.
 
 ## Useful prompts the user has given
 

@@ -1,9 +1,10 @@
 //@version=6
 indicator("Range Detector", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
 
+htfInput    = input.timeframe("60", "Analysis Timeframe", tooltip="Timeframe for structural analysis. Must be >= chart timeframe.")
 minPivotPct = input.float(0.20, "Min HH/LL Threshold %", minval=0.0, step=0.01, tooltip="Fractal must exceed prior by this % to qualify as HH/LL. Below threshold → classified as LH/HL instead.")
-showRefs   = input.bool(true, "Show ref markers")
-maxLB      = input.int(2000, "Max lookback bars", minval=50)
+showRefs    = input.bool(true, "Show ref markers")
+maxLB       = input.int(2000, "Max lookback bars", minval=50)
 
 cBullBgActive  = color.new(color.green,  80)
 cBearBgActive  = color.new(color.red,    80)
@@ -14,212 +15,211 @@ cHistEdge      = color.new(color.gray,   80)
 cMid           = color.new(color.orange, 20)
 cHistMid       = color.new(color.gray,   80)
 
-// Bill Williams 5-bar fractal (matches user's Fractals indicator default)
-fh = high[4] < high[2] and high[3] <= high[2] and high[2] >= high[1] and high[2] > high[0]
-fl = low[4] > low[2] and low[3] >= low[2] and low[2] <= low[1] and low[2] < low[0]
+// ── HTF ALGORITHM ──
+calcRanges(float minPct) =>
+    // Bill Williams 5-bar fractal
+    fh = high[4] < high[2] and high[3] <= high[2] and high[2] >= high[1] and high[2] > high[0]
+    fl = low[4] > low[2] and low[3] >= low[2] and low[2] <= low[1] and low[2] < low[0]
 
-var float lastFH_p = na
-var float lastFL_p = na
+    var float lastFH_p = na
+    var float lastFL_p = na
+    var float current_HH_p = na
+    var int   current_HH_t = na
+    var float current_LL_p = na
+    var int   current_LL_t = na
+    var float candidate_HL_p = na
+    var int   candidate_HL_t = na
+    var float candidate_LH_p = na
+    var int   candidate_LH_t = na
+    var float refH_p = na
+    var int   refH_t = na
+    var float refL_p = na
+    var int   refL_t = na
+    var float structural_HH_p = na
+    var int   structural_HH_t = na
+    var float structural_LL_p = na
+    var int   structural_LL_t = na
+    var int   bias   = 0
+    var float rHi    = na
+    var float rLo    = na
+    var int   rStartT = na
+    var int   breakT  = na
 
-// "Current" structural pivots awaiting confirmation by next break
-var float current_HH_p = na
-var int   current_HH_b = na
-var float current_LL_p = na
-var int   current_LL_b = na
+    if fh
+        threshH = nz(lastFH_p) * minPct / 100
+        isHH = not na(lastFH_p) and high[2] > lastFH_p + threshH
+        isLH = not na(lastFH_p) and not isHH
+        if isHH and bias != -1
+            current_HH_p := high[2]
+            current_HH_t := time[2]
+            candidate_HL_p := na
+            candidate_HL_t := na
+        if isLH and bias != 1
+            candidate_LH_p := high[2]
+            candidate_LH_t := time[2]
+        lastFH_p := high[2]
 
-// Candidate (pending confirmation)
-var float candidate_HL_p = na
-var int   candidate_HL_b = na
-var float candidate_LH_p = na
-var int   candidate_LH_b = na
+    if fl
+        threshL = nz(lastFL_p) * minPct / 100
+        isLL = not na(lastFL_p) and low[2] < lastFL_p - threshL
+        isHL = not na(lastFL_p) and not isLL
+        if isLL and bias != 1
+            current_LL_p := low[2]
+            current_LL_t := time[2]
+            candidate_LH_p := na
+            candidate_LH_t := na
+        if isHL and bias != -1
+            candidate_HL_p := low[2]
+            candidate_HL_t := time[2]
+        lastFL_p := low[2]
 
-// Confirmed structural levels (the breakable refs)
-var float refH_p = na
-var int   refH_b = na
-var float refL_p = na
-var int   refL_b = na
+    newBreak = false
 
-// HH/LL that confirmed the current structural HL/LH (for flip-event range calc)
-var float structural_HH_p = na
-var int   structural_HH_b = na
-var float structural_LL_p = na
-var int   structural_LL_b = na
-
-var int   bias   = 0
-var float rHi    = na
-var float rLo    = na
-var int   rStart = na
-
-if fh
-    threshH = nz(lastFH_p) * minPivotPct / 100
-    isHH = not na(lastFH_p) and high[2] > lastFH_p + threshH
-    isLH = not na(lastFH_p) and not isHH
-    if isHH and bias != -1
-        current_HH_p := high[2]
-        current_HH_b := bar_index - 2
+    // HH break — continuation in bull (or initial bias from neutral)
+    if (bias == 1 or bias == 0) and not na(current_HH_p) and high >= current_HH_p and not na(candidate_HL_p)
+        bias := 1
+        refL_p := candidate_HL_p
+        refL_t := candidate_HL_t
+        structural_HH_p := current_HH_p
+        structural_HH_t := current_HH_t
+        rHi := current_HH_p
+        rLo := candidate_HL_p
+        rStartT := candidate_HL_t
+        newBreak := true
+        breakT := time
+        current_HH_p := na
+        current_HH_t := na
         candidate_HL_p := na
-        candidate_HL_b := na
-        log.info("FH→HH: price={0} lastFH={1} thresh={2} bias={3} bar={4}", high[2], lastFH_p, threshH, bias, bar_index - 2)
-    if isLH and bias != 1
-        candidate_LH_p := high[2]
-        candidate_LH_b := bar_index - 2
-        log.info("FH→LH: price={0} lastFH={1} bias={2} bar={3}", high[2], lastFH_p, bias, bar_index - 2)
-    if isHH and bias == -1
-        log.info("FH→HH IGNORED (bear bias): price={0} bar={1}", high[2], bar_index - 2)
-    if isLH and bias == 1
-        log.info("FH→LH IGNORED (bull bias): price={0} bar={1}", high[2], bar_index - 2)
-    lastFH_p := high[2]
+        candidate_HL_t := na
+        refH_p := na
+        refH_t := na
+        structural_LL_p := na
+        structural_LL_t := na
 
-if fl
-    threshL = nz(lastFL_p) * minPivotPct / 100
-    isLL = not na(lastFL_p) and low[2] < lastFL_p - threshL
-    isHL = not na(lastFL_p) and not isLL
-    if isLL and bias != 1
-        current_LL_p := low[2]
-        current_LL_b := bar_index - 2
+    // LL break — continuation in bear (or initial)
+    if not newBreak and (bias == -1 or bias == 0) and not na(current_LL_p) and low <= current_LL_p and not na(candidate_LH_p)
+        bias := -1
+        refH_p := candidate_LH_p
+        refH_t := candidate_LH_t
+        structural_LL_p := current_LL_p
+        structural_LL_t := current_LL_t
+        rHi := candidate_LH_p
+        rLo := current_LL_p
+        rStartT := candidate_LH_t
+        newBreak := true
+        breakT := time
+        current_LL_p := na
+        current_LL_t := na
         candidate_LH_p := na
-        candidate_LH_b := na
-        log.info("FL→LL: price={0} lastFL={1} thresh={2} bias={3} bar={4}", low[2], lastFL_p, threshL, bias, bar_index - 2)
-    if isHL and bias != -1
-        candidate_HL_p := low[2]
-        candidate_HL_b := bar_index - 2
-        log.info("FL→HL: price={0} lastFL={1} bias={2} bar={3}", low[2], lastFL_p, bias, bar_index - 2)
-    if isLL and bias == 1
-        log.info("FL→LL IGNORED (bull bias): price={0} bar={1}", low[2], bar_index - 2)
-    if isHL and bias == -1
-        log.info("FL→HL IGNORED (bear bias): price={0} bar={1}", low[2], bar_index - 2)
-    lastFL_p := low[2]
+        candidate_LH_t := na
+        refL_p := na
+        refL_t := na
+        structural_HH_p := na
+        structural_HH_t := na
 
-newBreak = false
+    // HL break — flip from bull to bear (trend fails)
+    if not newBreak and bias == 1 and not na(refL_p) and close <= refL_p
+        bias := -1
+        rLo := refL_p
+        rHi := na(lastFH_p) ? high : lastFH_p
+        rStartT := refL_t
+        newBreak := true
+        breakT := time
+        refH_p := math.max(rHi, high)
+        refH_t := time
+        refL_p := na
+        refL_t := na
+        structural_HH_p := na
+        structural_HH_t := na
+        current_HH_p := na
+        current_HH_t := na
+        candidate_HL_p := na
+        candidate_HL_t := na
 
-// HH break — continuation in bull (or initial bias from neutral)
-if (bias == 1 or bias == 0) and not na(current_HH_p) and high >= current_HH_p and not na(candidate_HL_p)
-    log.info("=== HH BREAK === high={0} >= current_HH={1} candidate_HL={2} old_refL={3} bias={4} bar={5}", high, current_HH_p, candidate_HL_p, refL_p, bias, bar_index)
-    bias := 1
-    refL_p := candidate_HL_p
-    refL_b := candidate_HL_b
-    structural_HH_p := current_HH_p
-    structural_HH_b := current_HH_b
-    rHi := current_HH_p
-    rLo := candidate_HL_p
-    rStart := candidate_HL_b
-    newBreak := true
-    current_HH_p := na
-    current_HH_b := na
-    candidate_HL_p := na
-    candidate_HL_b := na
-    refH_p := na
-    refH_b := na
-    structural_LL_p := na
-    structural_LL_b := na
+    // LH break — flip from bear to bull
+    if not newBreak and bias == -1 and not na(refH_p) and close >= refH_p
+        bias := 1
+        rHi := refH_p
+        rLo := na(lastFL_p) ? low : lastFL_p
+        rStartT := refH_t
+        newBreak := true
+        breakT := time
+        refL_p := math.min(rLo, low)
+        refL_t := time
+        refH_p := na
+        refH_t := na
+        structural_LL_p := na
+        structural_LL_t := na
+        current_LL_p := na
+        current_LL_t := na
+        candidate_LH_p := na
+        candidate_LH_t := na
 
-// LL break — continuation in bear (or initial)
-if not newBreak and (bias == -1 or bias == 0) and not na(current_LL_p) and low <= current_LL_p and not na(candidate_LH_p)
-    log.info("=== LL BREAK === low={0} <= current_LL={1} candidate_LH={2} old_refH={3} bias={4} bar={5}", low, current_LL_p, candidate_LH_p, refH_p, bias, bar_index)
-    bias := -1
-    refH_p := candidate_LH_p
-    refH_b := candidate_LH_b
-    structural_LL_p := current_LL_p
-    structural_LL_b := current_LL_b
-    rHi := candidate_LH_p
-    rLo := current_LL_p
-    rStart := candidate_LH_b
-    newBreak := true
-    current_LL_p := na
-    current_LL_b := na
-    candidate_LH_p := na
-    candidate_LH_b := na
-    refL_p := na
-    refL_b := na
-    structural_HH_p := na
-    structural_HH_b := na
+    mid = na(rHi) or na(rLo) ? na : (rHi + rLo) / 2.0
 
-// HL break — flip from bull to bear (trend fails)
-if not newBreak and bias == 1 and not na(refL_p) and close <= refL_p
-    log.info("=== HL FLIP (bull→bear) === low={0} <= refL={1} lastFH={2} bar={3}", low, refL_p, lastFH_p, bar_index)
-    bias := -1
-    rLo := refL_p
-    rHi := na(lastFH_p) ? high : lastFH_p
-    rStart := refL_b
-    newBreak := true
-    // Set counter-flip ref: use higher of range top and flip bar's high so counter-flip requires exceeding the flip bar
-    refH_p := math.max(rHi, high)
-    refH_b := bar_index
-    // Reset bull-side state
-    refL_p := na
-    refL_b := na
-    structural_HH_p := na
-    structural_HH_b := na
-    current_HH_p := na
-    current_HH_b := na
-    candidate_HL_p := na
-    candidate_HL_b := na
+    [newBreak, bias, rHi, rLo, mid, rStartT, refH_p, refL_p, breakT]
 
-// LH break — flip from bear to bull
-if not newBreak and bias == -1 and not na(refH_p) and close >= refH_p
-    log.info("=== LH FLIP (bear→bull) === high={0} >= refH={1} lastFL={2} bar={3}", high, refH_p, lastFL_p, bar_index)
-    bias := 1
-    rHi := refH_p
-    rLo := na(lastFL_p) ? low : lastFL_p
-    rStart := refH_b
-    newBreak := true
-    // Set counter-flip ref: use lower of range bottom and flip bar's low so counter-flip requires exceeding the flip bar
-    refL_p := math.min(rLo, low)
-    refL_b := bar_index
-    // Reset bear-side state
-    refH_p := na
-    refH_b := na
-    structural_LL_p := na
-    structural_LL_b := na
-    current_LL_p := na
-    current_LL_b := na
-    candidate_LH_p := na
-    candidate_LH_b := na
+// ── REQUEST HTF DATA ──
+[htfBreak, htfBias, htfHi, htfLo, htfMid, htfStartTime, htfRefH, htfRefL, htfBreakTime] = request.security(syminfo.tickerid, htfInput, calcRanges(minPivotPct), barmerge.gaps_off, barmerge.lookahead_on)
 
-mid   = na(rHi) or na(rLo) ? na : (rHi + rLo) / 2.0
+// ── BREAK DEDUPLICATION ──
+// request.security forward-fills on every LTF bar; only fire drawing logic once per HTF break
+var int lastProcessedBreakTime = 0
+isNewBreak = htfBreak and htfBreakTime != lastProcessedBreakTime
+if isNewBreak
+    lastProcessedBreakTime := htfBreakTime
 
+// ── DRAWINGS (xloc.bar_time so HTF ranges persist on LTF charts) ──
 var box   rangeBox  = na
 var line  midLine   = na
 var label biasLabel = na
 
-if newBreak
+if isNewBreak
     if not na(rangeBox)
-        box.set_right(rangeBox, bar_index)
+        box.set_right(rangeBox, time)
         box.set_bgcolor(rangeBox, cHistBg)
         box.set_border_color(rangeBox, cHistEdge)
         box.set_border_width(rangeBox, 1)
     if not na(midLine)
-        line.set_x2(midLine, bar_index)
+        line.set_x2(midLine, time)
         line.set_color(midLine, cHistMid)
-    bg   = bias == 1 ? cBullBgActive : cBearBgActive
-    edge = bias == 1 ? cBullEdge     : cBearEdge
-    rangeBox  := box.new(rStart, rHi, bar_index, rLo, border_color=edge, bgcolor=bg, border_width=2)
-    midLine   := line.new(rStart, mid, bar_index, mid, color=cMid, style=line.style_dashed, width=2)
-    txt    = bias == 1 ? "BUL" : "BER"
-    txtCol = bias == 1 ? color.green  : color.red
-    lblY   = bias == 1 ? rLo : rHi
-    lblSty = bias == 1 ? label.style_label_up : label.style_label_down
-    biasLabel := label.new(bar_index, lblY, txt, color=txtCol, textcolor=color.white, style=lblSty, size=size.normal)
+    bg   = htfBias == 1 ? cBullBgActive : cBearBgActive
+    edge = htfBias == 1 ? cBullEdge     : cBearEdge
+    rangeBox  := box.new(htfStartTime, htfHi, time, htfLo, border_color=edge, bgcolor=bg, border_width=2, xloc=xloc.bar_time)
+    midLine   := line.new(htfStartTime, htfMid, time, htfMid, color=cMid, style=line.style_dashed, width=2, xloc=xloc.bar_time)
+    txt    = htfBias == 1 ? "BUL" : "BER"
+    txtCol = htfBias == 1 ? color.green  : color.red
+    lblY   = htfBias == 1 ? htfLo : htfHi
+    lblSty = htfBias == 1 ? label.style_label_up : label.style_label_down
+    biasLabel := label.new(htfBreakTime, lblY, txt, color=txtCol, textcolor=color.white, style=lblSty, size=size.normal, xloc=xloc.bar_time)
 
-if not newBreak and not na(rangeBox)
-    box.set_right(rangeBox, bar_index)
-    line.set_x2(midLine, bar_index)
+if not isNewBreak and not na(rangeBox)
+    box.set_right(rangeBox, time_close)
+    line.set_x2(midLine, time_close)
 
-plotshape(showRefs and fh ? high[2] : na, title="Fractal H", style=shape.triangledown, location=location.absolute, color=color.new(color.red, 40), size=size.tiny, offset=-2, display=display.all - display.price_scale)
-plotshape(showRefs and fl ? low[2] : na, title="Fractal L", style=shape.triangleup, location=location.absolute, color=color.new(color.green, 40), size=size.tiny, offset=-2, display=display.all - display.price_scale)
+// ── FRACTAL MARKERS (only when chart TF >= analysis TF) ──
+bool isChartTF = timeframe.in_seconds() >= timeframe.in_seconds(htfInput)
+fhChart = high[4] < high[2] and high[3] <= high[2] and high[2] >= high[1] and high[2] > high[0]
+flChart = low[4] > low[2] and low[3] >= low[2] and low[2] <= low[1] and low[2] < low[0]
+plotshape(isChartTF and showRefs and fhChart ? high[2] : na, title="Fractal H", style=shape.triangledown, location=location.absolute, color=color.new(color.red, 40), size=size.tiny, offset=-2, display=display.all - display.price_scale)
+plotshape(isChartTF and showRefs and flChart ? low[2] : na, title="Fractal L", style=shape.triangleup, location=location.absolute, color=color.new(color.green, 40), size=size.tiny, offset=-2, display=display.all - display.price_scale)
 
-var table tbl = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 80), border_width=1)
+// ── INFO TABLE ──
+var table tbl = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 80), border_width=1)
 
 if barstate.islast
-    biasStr = bias == 1 ? "BULLISH" : bias == -1 ? "BEARISH" : "NEUTRAL"
-    biasCol = bias == 1 ? color.green : bias == -1 ? color.red : color.gray
+    tfWarning = timeframe.in_seconds() > timeframe.in_seconds(htfInput)
+    biasStr = htfBias == 1 ? "BULLISH" : htfBias == -1 ? "BEARISH" : "NEUTRAL"
+    biasCol = htfBias == 1 ? color.green : htfBias == -1 ? color.red : color.gray
     table.cell(tbl, 0, 0, "Bias", text_color=color.white, text_size=size.small)
-    table.cell(tbl, 1, 0, biasStr, text_color=biasCol, text_size=size.small)
+    table.cell(tbl, 1, 0, biasStr, text_color=tfWarning ? color.orange : biasCol, text_size=size.small)
     table.cell(tbl, 0, 1, "Range High", text_color=color.white, text_size=size.small)
-    table.cell(tbl, 1, 1, str.tostring(rHi, format.mintick), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 1, str.tostring(htfHi, format.mintick), text_color=color.white, text_size=size.small)
     table.cell(tbl, 0, 2, "Range Low", text_color=color.white, text_size=size.small)
-    table.cell(tbl, 1, 2, str.tostring(rLo, format.mintick), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 2, str.tostring(htfLo, format.mintick), text_color=color.white, text_size=size.small)
     table.cell(tbl, 0, 3, "50%", text_color=color.white, text_size=size.small)
-    table.cell(tbl, 1, 3, str.tostring(mid, format.mintick), text_color=color.orange, text_size=size.small)
+    table.cell(tbl, 1, 3, str.tostring(htfMid, format.mintick), text_color=color.orange, text_size=size.small)
     table.cell(tbl, 0, 4, "LH / HL", text_color=color.white, text_size=size.small)
-    table.cell(tbl, 1, 4, str.tostring(refH_p, format.mintick) + " / " + str.tostring(refL_p, format.mintick), text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 1, 4, str.tostring(htfRefH, format.mintick) + " / " + str.tostring(htfRefL, format.mintick), text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 0, 5, "TF", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 5, htfInput + (tfWarning ? " !" : ""), text_color=tfWarning ? color.orange : color.gray, text_size=size.small)
