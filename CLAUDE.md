@@ -2,16 +2,19 @@
 
 This file dumps everything Claude needs to pick up where the previous session left off. The user is iterating on a Pine Script (TradingView) indicator + strategy that detects 1hr structural ranges on US500 for trade entries.
 
-## TL;DR State on Pause (2026-05-06)
+## TL;DR State on Pause (2026-05-07)
 
 - **Symbol/timeframe**: PEPPERSTONE:US500 1hr
-- **Current files in this repo**: `indicator.pine` (latest live logic), `strategy.pine` (mirrors indicator + adds entries/exits)
+- **Current files in this repo**: `indicator.pine` (latest live logic v13), `strategy.pine` (needs update to match indicator), `trace.py` (offline Python trace tool)
 - **TradingView cloud script names**:
   - Indicator: `Impulsive Break & Retracement v1 CC 0505` (title shown as "Range Detector")
   - Strategy: `Range Detector Strategy`
-- **What works**: HH/HL/LL/LH classification with confirmation gating; continuation breaks; flip breaks; range-box drawing with active-vs-historical fade; fractal markers locked to actual prices via `location.absolute`.
-- **What's still wrong**: Indicator over-fires breaks. Specifically the user said the **April 29 bear break shouldn't fire** — at that bar no structural low actually broke (per their reading). My code's `low <= refL_p` triggers somewhere a wick clipped a level my code thought was structural but the user thinks is internal/noise.
-- **Next debugging step**: Add `log.info()` debug output to print `current_HH_p`, `candidate_HL_p`, `refL_p`, etc. on each bar around April 29-30, and trace why the bear flip fires 7h late vs the user's expected 29/4 11:00.
+- **What works**: HH/HL/LL/LH classification with confirmation gating; continuation breaks; flip breaks; range-box drawing with active-vs-historical fade; fractal markers locked to actual prices via `location.absolute`; configurable `minPivotPct` threshold (now **0.20%**) for HH/LL classification; **counter-flip refs** prevent indicator from getting permanently stuck in one bias. May 4-6 structural sequence verified correct: BER→BUL flip→BUL [7283.4, 7299.1]→BUL [7306.9, 7344.0].
+- **What changed this session (v13)**: Two fixes applied together: (1) `minPivotPct` raised from 0.15% to 0.20% — prevents FH at 7239.3 from qualifying as HH (13pts < 14.5pt threshold), eliminating false micro-range cascade and false BER flips in the May 5-6 rally. (2) **flip-lock removed** — `flipHH_lock`/`flipLL_lock` and the seeding of `current_HH_p`/`current_LL_p` from the flip level were removed entirely. After a flip, the indicator now waits for genuine HH/LL fractals to form before firing continuation breaks. This fixed the inverted box problem where rHi < rLo after a flip (e.g., the BUL box at 7283.4 was showing [7248.8, 7283.4] instead of [7283.4, 7299.1]).
+- **What needs re-verification**: The April 29 bear continuation area changed because flipLL_lock was also removed. The old `[7144.6, 7162.7]` bear box is no longer present — bear breaks there are now at different levels (7152.1, 7119.5). Needs user review during day-by-day walkthrough.
+- **What's still noisy**: Indicator produces 503 breaks across full history — still too many intermediate breaks. Day-by-day walkthrough with the user is still needed to calibrate.
+- **Chart rendering note**: With 500 drawing objects spanning 4700-7300+, the Y-axis gets compressed. User may need to re-pin indicator to price scale. Consider reducing drawing limits.
+- **Next step**: Re-verify April 29 area with user. Then continue day-by-day walkthrough to reduce noise.
 
 ## Strategy Rules (the live model)
 
@@ -22,10 +25,10 @@ This is what we worked out with the user across multiple iterations. **Implement
 The market is in one of three biases: bullish (1), bearish (-1), or neutral (0). Bias starts neutral and gets set on the first qualifying break.
 
 Pivots are classified at each Bill Williams 5-bar fractal:
-- **HH** = fractal high > prior fractal high
-- **HL** = fractal low > prior fractal low
-- **LL** = fractal low < prior fractal low
-- **LH** = fractal high < prior fractal high
+- **HH** = fractal high > prior fractal high + threshold (`minPivotPct`, default 0.20%)
+- **HL** = fractal low that doesn't qualify as LL (i.e., NOT below prior - threshold)
+- **LL** = fractal low < prior fractal low - threshold
+- **LH** = fractal high that doesn't qualify as HH (i.e., NOT above prior + threshold)
 
 ### Confirmation gating (the key insight)
 
@@ -53,8 +56,8 @@ User: *"its not just flips. We trade the trend until it fails."* So both **conti
 | LL break (continuation) | bear bias, `low <= current_LL_p` AND have candidate LH | `[current_LL, candidate_LH]` | bear |
 | HH break (initial) | neutral, first HH break | same as continuation | bull |
 | LL break (initial) | neutral, first LL break | same as continuation | bear |
-| HL break (flip) | bull bias, `low <= refL_p` (the structural HL) | `[refL_p, structural_HH_p]` | bear |
-| LH break (flip) | bear bias, `high >= refH_p` | `[structural_LL_p, refH_p]` | bull |
+| HL break (flip) | bull bias, `close <= refL_p` (the structural HL) | `[refL_p, lastFH_p]` | bear |
+| LH break (flip) | bear bias, `close >= refH_p` | `[lastFL_p, refH_p]` | bull |
 
 Priority order on a single bar (in case multiple conditions true): continuation first, flip second. After any break fires, skip subsequent break checks for that bar (`newBreak` guard).
 
@@ -98,8 +101,8 @@ var float rHi, rLo                    // current active range
 Reset behavior on each event type:
 - HH break: reset `current_HH`, `candidate_HL`, all bear-side state (`refH_p`, `structural_LL_p`).
 - LL break: reset bear cands + bull-side state.
-- HL break (flip): reset all bull-side state. Bear-side state to be built fresh from new fractals.
-- LH break (flip): reset all bear-side state.
+- HL break (flip): set `refH_p := max(rHi, high)` for counter-flip, reset all bull-side state. New fractals build bear-side state from scratch.
+- LH break (flip): set `refL_p := min(rLo, low)` for counter-flip, reset all bear-side state. New fractals build bull-side state from scratch.
 
 ## Iteration history (so you don't repeat mistakes)
 
@@ -111,6 +114,17 @@ We went through these incarnations:
 5. **v5 (confirmation by HH break)**: Replaced gates with explicit `current_HH_p` + `candidate_HL_p` model. HL becomes structural only when current HH actually breaks. This is what's in this repo.
 6. **v6 (continuation breaks)**: Each HH break in bull (or LL break in bear) draws a *new* range box, not just flip events. User confirmed this is correct: *"its not just flips. We trade the trend until it fails."* Live in this repo.
 7. **v7 (bias-gated tracking)**: Don't track HH/HL when bias is bear, don't track LL/LH when bias is bull. Live in this repo.
+8. **v8 (minPivotPct threshold)**: Added `minPivotPct` input (default 0.15%). Fractal must exceed prior by this % to qualify as HH/LL; below threshold → classified as LH/HL. Filters the 0.5pt HH difference (7162.7→7163.2) that was causing false continuations. Default changed from 0.05% to 0.15% (≈10.7pts at US500 7100) to filter more aggressively.
+9. **v9 (flip range uses lastFH_p/lastFL_p)**: Changed flip break range definition. Bear flip `rHi` now uses `lastFH_p` (most recent fractal high) instead of `structural_HH_p`. Bull flip `rLo` uses `lastFL_p` instead of `structural_LL_p`. This gives the range a top/bottom that reflects the most recent failed swing, not an old structural level.
+10. **v10 (deepest HL attempt — REVERTED)**: Tried only advancing `refL_p` if new candidate_HL was LOWER than existing refL_p. This caused refL_p to get stuck at ancient levels and prevented flips entirely. Reverted immediately.
+11. **v11 (keep deeper refL_p with safety valve — REVERTED)**: On bull continuations, only advance `refL_p` if new `candidate_HL` is lower (deeper), with `maxRangePct` (5%) safety valve forcing advancement when refL_p is too far below current_HH. Same fundamental flaw as v10: refL_p stays at deep levels, bear flip never fires. No bear break in the April 29 area at all. Reverted.
+12. **v12 (flip-lock)**: After a flip, seed `current_LL_p`/`current_HH_p` from the flip's break level and protect it with `flipLL_lock`/`flipHH_lock` booleans. Deep impulse LL/HH detections during the locked phase are skipped (don't overwrite current_LL/HH, don't clear candidate_LH/HL). Lock released on first continuation break. Python trace shows bear continuation at `[7144.6, 7162.7]` at Apr 29 07:00 UTC — close to user's expected `[7144.4, 7163.2]` (0.2pt low diff, 0.5pt high diff). Live in this repo.
+13. **v12b (counter-flip refs — CRITICAL FIX)**: After deploying v12, discovered the indicator was stuck in bear bias at price level 5555 while US500 was at 7350. Root cause: after an HL flip, `refH_p` was never set, so a LH flip (the only way back to bull) was impossible. Same deadlock existed symmetrically on LH flip. **Fix**: on each flip, set the opposite-side ref (`refH_p := rHi` on HL flip, `refL_p := rLo` on LH flip) so a counter-flip can fire if the thesis fails immediately. This means: if you flip to bear but price reclaims the flip's high, you flip back to bull. With this fix, indicator produces 505 breaks across full history and current range is BULLISH [7306.9, 7344.0] matching today's price of ~7350. Live in this repo.
+14. **v13 (threshold 0.20% + flip-lock removed)**: Two fixes applied together to resolve the May 4-6 structural sequence:
+    - **Threshold raised to 0.20%**: At 0.15%, FH at 7239.3 was 13pts above lastFH — exceeded the 10.8pt threshold, qualifying as HH. This created a fragile micro-range that cascaded into false BER flips in the May 5-6 rally. At 0.20%, the threshold is 14.5pts, so 13pts doesn't qualify → classified as LH instead → no micro-range → no false BER cascade.
+    - **flip-lock removed entirely**: `flipHH_lock`/`flipLL_lock` variables and all associated logic deleted. After a flip, the code no longer seeds `current_HH_p`/`current_LL_p` from the flip level. Instead, it waits for genuine HH/LL fractals to form before the first continuation break can fire. This fixed the inverted box problem: previously, after a bull flip, `current_HH_p` was seeded at the flip level (7248.8) and locked. The first fractal low (7283.4, which was ABOVE 7248.8) triggered a premature HH break with `rHi=7248.8, rLo=7283.4` — an inverted range. With the lock removed, the first real HH fractal (7299.1) sets `current_HH_p`, then the HL fractal (7283.4) sets `candidate_HL_p`, and the break fires correctly with `[7283.4, 7299.1]`.
+    - **Verified**: May 4-6 sequence matches user's expected structure. BUL box [7283.4, 7299.1] correct. No false BER labels in rally. BUL [7306.9, 7344.0] correct.
+    - **Side effect**: April 29 area changed — old bear continuation `[7144.6, 7162.7]` no longer present. Bear breaks there moved to different levels. Needs re-verification. Live in this repo.
 
 ## Other things we discovered
 
@@ -131,23 +145,33 @@ We went through these incarnations:
 - `pine_open` opens a script in the editor but if Pine Editor panel isn't open, it errors. Use `ui_open_panel` first.
 - `pine_set_source` works when editor is open AND a script is open. If "Could not open Pine Editor" error: re-open panel + script.
 - `data_get_pine_labels` caps default at 50 labels visible (out of total). Pass `max_labels` higher to see more.
+- `pine_get_console` appears to NOT read runtime `log.info()` output — returned 0 entries even after adding extensive logging and compiling. May only read compilation output. **Workaround**: use `data_get_ohlcv` to get bar data, then run the algorithm offline in Python (`trace.py`) for bar-by-bar state tracing. This is faster and more reliable than trying to read Pine logs.
 
 ## Open issues / next steps
 
-1. **April 29 false bear break (HIGHEST PRIORITY)**: User-reported. The indicator fires a bear break around 18:00 but per user's structural reading the actual HL break happens at 11:00 (so my code is 7h late, OR the user's annotation date is off — needs verification). User-provided prices for April 29: HH=7162.7 (04:00), HL=7144.4 (05:00), HH=7163.2 (10:00), break low=7144.2 (11:00). These tight numbers (0.5pt HH spacing, 0.2pt break) match bars near `1777424400` (low 7144.4) and `1777446000` (low 7144.2) in the OHLCV data. User's chart appears to be UTC+4. **Approach**: Add `log.info()` to the indicator that prints state on each bar in this window. Compile, then read `pine_get_console` to trace exactly when/why the break fires.
+1. **April 29 bear break — NEEDS RE-VERIFICATION**: v13 removed flip-lock, which changed the April 29 area. The old `[7144.6, 7162.7]` bear box is gone — bear breaks there are now at different levels (7152.1, 7119.5). Needs user review during day-by-day walkthrough to confirm these are acceptable.
 
-2. **Possible refinement: 1hr-only filter on fractals**: The user uses Bill Williams 5-bar which captures a lot of internal pivots. Once #1 is debugged, consider whether a longer-period fractal (7-bar or 9-bar) or ZigZag-style minimum-percent filter would better match the user's "external structure" reading.
+2. **Too many intermediate breaks**: The indicator produces ~500 breaks across full history — likely too noisy. The counter-flip refs enable rapid flip-flopping in choppy price action. Need user review of broader chart to identify where breaks should NOT fire. The day-by-day walkthrough approach (user's suggestion) is still the right calibration method.
 
-3. **Strategy validation**: Once indicator's break detection matches user's structural reading, run the strategy in TV strategy tester and check trade win-rate / drawdown. User mentioned target = 3R, BE @ 1.5R (currently strategy only has fixed TP at 3R, no BE move).
+3. **Chart scale/rendering issue**: With 500 boxes/labels/lines spanning the full price range (4700 to 7300+), the chart Y-axis gets compressed. The user may need to re-pin the indicator to the price scale. Consider reducing `max_boxes_count`/`max_labels_count`/`max_lines_count` or adding a lookback limit that deletes drawings older than N bars.
 
-4. **Original PRD mechanics not implemented**: The user's chart annotation references additional rules (mitigate 50% / HT FVG / AOI, internal sweep, IFVG 1m, CISD, BE @ 1.5R). The user explicitly said *"lets just trade the 1hr trend, not the 1m"* so these are deferred. Document only — don't build until requested.
+4. **Remove log.info() instrumentation**: The indicator still has `log.info()` calls throughout for debugging. These should be removed once calibration is complete, to keep the code clean and avoid hitting Pine's log limits.
+
+5. **Strategy validation**: Once indicator's break detection is user-approved, update `strategy.pine` to mirror the v13 indicator logic (no flip-lock, 0.20% threshold, counter-flip refs), then run in TV strategy tester.
+
+6. **Possible refinement: fractal filter**: Consider whether a longer-period fractal (7-bar or 9-bar) or ZigZag-style minimum-percent filter would reduce noise. Defer until after day-by-day walkthrough.
+
+7. **Original PRD mechanics not implemented**: The user's chart annotation references additional rules (mitigate 50% / HT FVG / AOI, internal sweep, IFVG 1m, CISD, BE @ 1.5R). The user explicitly said *"lets just trade the 1hr trend, not the 1m"* so these are deferred. Document only — don't build until requested.
 
 ## How to resume next session
 
 1. Read this CLAUDE.md.
 2. Verify TV connection: `mcp__tradingview__tv_health_check`.
 3. Open the latest indicator/strategy in the editor and verify they match this repo's files.
-4. Pick up at "Open issues #1" — add `log.info()` instrumentation around the `current_HH_p` / `candidate_HL_p` / break-event blocks. Compile, set chart visible range to April 29 area, read console output, and trace.
+4. Re-verify April 29 area with user — v13 changed bear breaks there (old `[7144.6, 7162.7]` is gone, new levels at 7152.1, 7119.5). User needs to confirm acceptability.
+5. Begin day-by-day walkthrough: user marks which fractals are structural vs internal at each step, code gets calibrated to match.
+6. Consider reducing drawing limits or adding lookback pruning if chart rendering is problematic.
+7. Update `strategy.pine` to match v13 indicator logic once indicator is user-approved.
 
 ## Useful prompts the user has given
 

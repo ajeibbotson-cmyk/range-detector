@@ -1,9 +1,9 @@
 //@version=6
 indicator("Range Detector", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
 
-zoneWidth = input.float(0.15, "Zone Width %", minval=0.01)
-showRefs  = input.bool(true, "Show ref markers")
-maxLB     = input.int(2000, "Max lookback bars", minval=50)
+minPivotPct = input.float(0.20, "Min HH/LL Threshold %", minval=0.0, step=0.01, tooltip="Fractal must exceed prior by this % to qualify as HH/LL. Below threshold → classified as LH/HL instead.")
+showRefs   = input.bool(true, "Show ref markers")
+maxLB      = input.int(2000, "Max lookback bars", minval=50)
 
 cBullBgActive  = color.new(color.green,  80)
 cBearBgActive  = color.new(color.red,    80)
@@ -12,9 +12,7 @@ cBullEdge      = color.new(color.green,  20)
 cBearEdge      = color.new(color.red,    20)
 cHistEdge      = color.new(color.gray,   80)
 cMid           = color.new(color.orange, 20)
-cZoneBg        = color.new(color.orange, 75)
 cHistMid       = color.new(color.gray,   80)
-cHistZone      = color.new(color.gray,   95)
 
 // Bill Williams 5-bar fractal (matches user's Fractals indicator default)
 fh = high[4] < high[2] and high[3] <= high[2] and high[2] >= high[1] and high[2] > high[0]
@@ -53,35 +51,50 @@ var float rLo    = na
 var int   rStart = na
 
 if fh
-    isHH = not na(lastFH_p) and high[2] > lastFH_p
-    isLH = not na(lastFH_p) and high[2] < lastFH_p
+    threshH = nz(lastFH_p) * minPivotPct / 100
+    isHH = not na(lastFH_p) and high[2] > lastFH_p + threshH
+    isLH = not na(lastFH_p) and not isHH
     if isHH and bias != -1
         current_HH_p := high[2]
         current_HH_b := bar_index - 2
         candidate_HL_p := na
         candidate_HL_b := na
+        log.info("FH→HH: price={0} lastFH={1} thresh={2} bias={3} bar={4}", high[2], lastFH_p, threshH, bias, bar_index - 2)
     if isLH and bias != 1
         candidate_LH_p := high[2]
         candidate_LH_b := bar_index - 2
+        log.info("FH→LH: price={0} lastFH={1} bias={2} bar={3}", high[2], lastFH_p, bias, bar_index - 2)
+    if isHH and bias == -1
+        log.info("FH→HH IGNORED (bear bias): price={0} bar={1}", high[2], bar_index - 2)
+    if isLH and bias == 1
+        log.info("FH→LH IGNORED (bull bias): price={0} bar={1}", high[2], bar_index - 2)
     lastFH_p := high[2]
 
 if fl
-    isHL = not na(lastFL_p) and low[2] > lastFL_p
-    isLL = not na(lastFL_p) and low[2] < lastFL_p
+    threshL = nz(lastFL_p) * minPivotPct / 100
+    isLL = not na(lastFL_p) and low[2] < lastFL_p - threshL
+    isHL = not na(lastFL_p) and not isLL
     if isLL and bias != 1
         current_LL_p := low[2]
         current_LL_b := bar_index - 2
         candidate_LH_p := na
         candidate_LH_b := na
+        log.info("FL→LL: price={0} lastFL={1} thresh={2} bias={3} bar={4}", low[2], lastFL_p, threshL, bias, bar_index - 2)
     if isHL and bias != -1
         candidate_HL_p := low[2]
         candidate_HL_b := bar_index - 2
+        log.info("FL→HL: price={0} lastFL={1} bias={2} bar={3}", low[2], lastFL_p, bias, bar_index - 2)
+    if isLL and bias == 1
+        log.info("FL→LL IGNORED (bull bias): price={0} bar={1}", low[2], bar_index - 2)
+    if isHL and bias == -1
+        log.info("FL→HL IGNORED (bear bias): price={0} bar={1}", low[2], bar_index - 2)
     lastFL_p := low[2]
 
 newBreak = false
 
 // HH break — continuation in bull (or initial bias from neutral)
 if (bias == 1 or bias == 0) and not na(current_HH_p) and high >= current_HH_p and not na(candidate_HL_p)
+    log.info("=== HH BREAK === high={0} >= current_HH={1} candidate_HL={2} old_refL={3} bias={4} bar={5}", high, current_HH_p, candidate_HL_p, refL_p, bias, bar_index)
     bias := 1
     refL_p := candidate_HL_p
     refL_b := candidate_HL_b
@@ -102,6 +115,7 @@ if (bias == 1 or bias == 0) and not na(current_HH_p) and high >= current_HH_p an
 
 // LL break — continuation in bear (or initial)
 if not newBreak and (bias == -1 or bias == 0) and not na(current_LL_p) and low <= current_LL_p and not na(candidate_LH_p)
+    log.info("=== LL BREAK === low={0} <= current_LL={1} candidate_LH={2} old_refH={3} bias={4} bar={5}", low, current_LL_p, candidate_LH_p, refH_p, bias, bar_index)
     bias := -1
     refH_p := candidate_LH_p
     refH_b := candidate_LH_b
@@ -121,12 +135,17 @@ if not newBreak and (bias == -1 or bias == 0) and not na(current_LL_p) and low <
     structural_HH_b := na
 
 // HL break — flip from bull to bear (trend fails)
-if not newBreak and bias == 1 and not na(refL_p) and low <= refL_p
+if not newBreak and bias == 1 and not na(refL_p) and close <= refL_p
+    log.info("=== HL FLIP (bull→bear) === low={0} <= refL={1} lastFH={2} bar={3}", low, refL_p, lastFH_p, bar_index)
     bias := -1
     rLo := refL_p
-    rHi := na(structural_HH_p) ? high : structural_HH_p
+    rHi := na(lastFH_p) ? high : lastFH_p
     rStart := refL_b
     newBreak := true
+    // Set counter-flip ref: use higher of range top and flip bar's high so counter-flip requires exceeding the flip bar
+    refH_p := math.max(rHi, high)
+    refH_b := bar_index
+    // Reset bull-side state
     refL_p := na
     refL_b := na
     structural_HH_p := na
@@ -137,12 +156,17 @@ if not newBreak and bias == 1 and not na(refL_p) and low <= refL_p
     candidate_HL_b := na
 
 // LH break — flip from bear to bull
-if not newBreak and bias == -1 and not na(refH_p) and high >= refH_p
+if not newBreak and bias == -1 and not na(refH_p) and close >= refH_p
+    log.info("=== LH FLIP (bear→bull) === high={0} >= refH={1} lastFL={2} bar={3}", high, refH_p, lastFL_p, bar_index)
     bias := 1
     rHi := refH_p
-    rLo := na(structural_LL_p) ? low : structural_LL_p
+    rLo := na(lastFL_p) ? low : lastFL_p
     rStart := refH_b
     newBreak := true
+    // Set counter-flip ref: use lower of range bottom and flip bar's low so counter-flip requires exceeding the flip bar
+    refL_p := math.min(rLo, low)
+    refL_b := bar_index
+    // Reset bear-side state
     refH_p := na
     refH_b := na
     structural_LL_p := na
@@ -153,13 +177,9 @@ if not newBreak and bias == -1 and not na(refH_p) and high >= refH_p
     candidate_LH_b := na
 
 mid   = na(rHi) or na(rLo) ? na : (rHi + rLo) / 2.0
-zHalf = na(mid) ? na : mid * zoneWidth / 100.0
-zTop  = na(mid) ? na : mid + zHalf
-zBot  = na(mid) ? na : mid - zHalf
 
 var box   rangeBox  = na
 var line  midLine   = na
-var box   zoneBox   = na
 var label biasLabel = na
 
 if newBreak
@@ -171,16 +191,11 @@ if newBreak
     if not na(midLine)
         line.set_x2(midLine, bar_index)
         line.set_color(midLine, cHistMid)
-    if not na(zoneBox)
-        box.set_right(zoneBox, bar_index)
-        box.set_bgcolor(zoneBox, cHistZone)
-        box.set_border_color(zoneBox, cHistMid)
     bg   = bias == 1 ? cBullBgActive : cBearBgActive
     edge = bias == 1 ? cBullEdge     : cBearEdge
     rangeBox  := box.new(rStart, rHi, bar_index, rLo, border_color=edge, bgcolor=bg, border_width=2)
     midLine   := line.new(rStart, mid, bar_index, mid, color=cMid, style=line.style_dashed, width=2)
-    zoneBox   := box.new(rStart, zTop, bar_index, zBot, border_color=cMid, bgcolor=cZoneBg, border_width=1)
-    txt    = bias == 1 ? "BULL BREAK" : "BEAR BREAK"
+    txt    = bias == 1 ? "BUL" : "BER"
     txtCol = bias == 1 ? color.green  : color.red
     lblY   = bias == 1 ? rLo : rHi
     lblSty = bias == 1 ? label.style_label_up : label.style_label_down
@@ -189,7 +204,6 @@ if newBreak
 if not newBreak and not na(rangeBox)
     box.set_right(rangeBox, bar_index)
     line.set_x2(midLine, bar_index)
-    box.set_right(zoneBox, bar_index)
 
 plotshape(showRefs and fh ? high[2] : na, title="Fractal H", style=shape.triangledown, location=location.absolute, color=color.new(color.red, 40), size=size.tiny, offset=-2, display=display.all - display.price_scale)
 plotshape(showRefs and fl ? low[2] : na, title="Fractal L", style=shape.triangleup, location=location.absolute, color=color.new(color.green, 40), size=size.tiny, offset=-2, display=display.all - display.price_scale)
