@@ -84,7 +84,7 @@ calcRanges(float minPct) =>
         structural_HH_t := current_HH_t
         rHi := current_HH_p
         rLo := candidate_HL_p
-        rStartT := candidate_HL_t
+        rStartT := current_HH_t
         newBreak := true
         breakT := time
         current_HH_p := na
@@ -105,7 +105,7 @@ calcRanges(float minPct) =>
         structural_LL_t := current_LL_t
         rHi := candidate_LH_p
         rLo := current_LL_p
-        rStartT := candidate_LH_t
+        rStartT := current_LL_t
         newBreak := true
         breakT := time
         current_LL_p := na
@@ -176,26 +176,20 @@ var label biasLabel = na
 
 if isNewBreak
     if not na(rangeBox)
-        box.set_right(rangeBox, time)
         box.set_bgcolor(rangeBox, cHistBg)
         box.set_border_color(rangeBox, cHistEdge)
         box.set_border_width(rangeBox, 1)
     if not na(midLine)
-        line.set_x2(midLine, time)
         line.set_color(midLine, cHistMid)
     bg   = htfBias == 1 ? cBullBgActive : cBearBgActive
     edge = htfBias == 1 ? cBullEdge     : cBearEdge
-    rangeBox  := box.new(htfStartTime, htfHi, time, htfLo, border_color=edge, bgcolor=bg, border_width=2, xloc=xloc.bar_time)
-    midLine   := line.new(htfStartTime, htfMid, time, htfMid, color=cMid, style=line.style_dashed, width=2, xloc=xloc.bar_time)
+    rangeBox  := box.new(htfStartTime, htfHi, htfBreakTime, htfLo, border_color=edge, bgcolor=bg, border_width=2, xloc=xloc.bar_time)
+    midLine   := line.new(htfStartTime, htfMid, htfBreakTime, htfMid, color=cMid, style=line.style_dashed, width=2, xloc=xloc.bar_time)
     txt    = htfBias == 1 ? "BUL" : "BER"
     txtCol = htfBias == 1 ? color.green  : color.red
     lblY   = htfBias == 1 ? htfLo : htfHi
     lblSty = htfBias == 1 ? label.style_label_up : label.style_label_down
     biasLabel := label.new(htfBreakTime, lblY, txt, color=txtCol, textcolor=color.white, style=lblSty, size=size.normal, xloc=xloc.bar_time)
-
-if not isNewBreak and not na(rangeBox)
-    box.set_right(rangeBox, time_close)
-    line.set_x2(midLine, time_close)
 
 // ── FRACTAL MARKERS (only when chart TF >= analysis TF) ──
 bool isChartTF = timeframe.in_seconds() >= timeframe.in_seconds(htfInput)
