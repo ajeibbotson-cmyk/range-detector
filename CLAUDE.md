@@ -2,17 +2,19 @@
 
 This file dumps everything Claude needs to pick up where the previous session left off. The user is iterating on a Pine Script (TradingView) indicator + strategy that detects 1hr structural ranges on US500 for trade entries.
 
-## TL;DR State on Pause (2026-05-07)
+## TL;DR State on Pause (2026-05-08)
 
 - **Symbol/timeframe**: PEPPERSTONE:US500 1hr
-- **Current files in this repo**: `indicator.pine` (latest live logic v14-MTF), `strategy.pine` (needs update to match indicator), `trace.py` (offline Python trace tool)
+- **Current files in this repo**: `indicator.pine` (latest live logic v15-pending-breaks), `strategy.pine` (needs update to match indicator), `trace.py` (offline Python trace tool)
 - **TradingView cloud script names**:
   - Indicator: `Impulsive Break & Retracement v1 CC 0505` (title shown as "Range Detector")
   - Strategy: `Range Detector Strategy`
-- **What works**: HH/HL/LL/LH classification with confirmation gating; continuation breaks; flip breaks; range-box drawing with active-vs-historical fade; fractal markers locked to actual prices via `location.absolute`; configurable `minPivotPct` threshold (now **0.20%**) for HH/LL classification; **counter-flip refs** prevent indicator from getting permanently stuck in one bias; **multi-timeframe support** — 1hr ranges persist on 5m/1m charts via `request.security()` with `xloc.bar_time` drawings. User confirmed MTF working correctly.
-- **What changed this session (v14-MTF)**: Refactored indicator for multi-timeframe support. (1) Added `htfInput` timeframe input (default "60") so analysis always runs on the chosen HTF. (2) Extracted entire algorithm into `calcRanges()` function — all 23 `var` state variables moved inside, all `bar_index` references converted to `time[]` for HTF/LTF compatibility. (3) Algorithm called via `request.security(syminfo.tickerid, htfInput, calcRanges(...), barmerge.gaps_off, barmerge.lookahead_on)` returning 9-value tuple. (4) Break deduplication via `lastProcessedBreakTime` to prevent repeated drawings from forward-filled HTF data. (5) All drawings converted to `xloc.bar_time`. (6) Fractal markers gated to only show when chart TF >= analysis TF. (7) Info table shows TF row with warning if chart TF > analysis TF. (8) Removed all `log.info()` instrumentation. **Pine gotcha discovered**: tuple destructuring `[...] = request.security(...)` must be on ONE line — line breaks between `] =` and `request.security(` cause a syntax error.
+- **What works**: HH/HL/LL/LH classification with confirmation gating; continuation breaks; flip breaks; range-box drawing with active-vs-historical fade; fractal markers locked to actual prices via `location.absolute`; configurable `minPivotPct` threshold (should be **0.20%**) for HH/LL classification; **counter-flip refs** prevent indicator from getting permanently stuck in one bias; **multi-timeframe support** — 1hr ranges persist on 5m/1m charts via `request.security()` with `xloc.bar_time` drawings; **pending break mechanism** — handles fractal lag by deferring LL/HH breaks when the opposing fractal (LH/HL) hasn't been confirmed yet, firing retroactively once the fractal is detected. User confirmed working on US500.
+- **What changed this session (v15-pending-breaks)**: Fixed fractal lag timing bug. (1) Added `pendingLLBreak`/`pendingHHBreak` boolean flags. (2) When price breaks LL/HH but `candidate_LH_p`/`candidate_HL_p` is `na` (opposing fractal not yet confirmed due to 2-bar detection lag), flag is set instead of firing the break. (3) When the opposing LH/HL fractal is finally detected, retroactive continuation fires using the existing `fractalFiredBreak` infrastructure. (4) Flags cleared on all 5 break paths (fractal-fired, HH continuation, LL continuation, HL flip, LH flip). (5) Also fixed box right edge — boxes now end 1 candle after break time instead of extending indefinitely (`boxRight = htfBreakTime + timeframe.in_seconds(htfInput) * 1000`).
+- **Specific bug fixed**: On US500, bear range was showing [7389.9, 7325.8] instead of [7325.8, 7358.5]. Root cause: the LH fractal at 7358.5 (bar center) wasn't detected until 2 bars later (5-bar fractal lag). By that time, price had already broken below current_LL_p (7325.8) but candidate_LH_p was still na, so the continuation couldn't fire. The pending mechanism defers the break and fires it retroactively when the LH at 7358.5 is confirmed. After the retroactive bear continuation, price then broke above 7358.5 → flipped to BULLISH [7322.9, 7358.5]. User confirmed correct.
 - **What needs re-verification**: The April 29 bear continuation area changed in v13 because flipLL_lock was removed. The old `[7144.6, 7162.7]` bear box is gone — bear breaks there are at different levels. Needs user review during day-by-day walkthrough.
 - **What's still noisy**: Indicator produces ~500 breaks across full history — still too many intermediate breaks. Day-by-day walkthrough with the user is still needed to calibrate.
+- **minPivotPct resets on re-add**: Every time the indicator is removed and re-added to the chart, inputs reset to defaults (minPivotPct → 0.0). User must manually set back to 0.20.
 - **Chart rendering note**: With 500 drawing objects spanning 4700-7300+, the Y-axis gets compressed. User may need to re-pin indicator to price scale. Consider reducing drawing limits.
 - **Next step**: Re-verify April 29 area with user. Then continue day-by-day walkthrough to reduce noise.
 
@@ -126,6 +128,7 @@ We went through these incarnations:
     - **Verified**: May 4-6 sequence matches user's expected structure. BUL box [7283.4, 7299.1] correct. No false BER labels in rally. BUL [7306.9, 7344.0] correct.
     - **Side effect**: April 29 area changed — old bear continuation `[7144.6, 7162.7]` no longer present. Bear breaks there moved to different levels. Needs re-verification. Live in this repo.
 15. **v14-MTF (multi-timeframe support)**: Refactored for MTF. Algorithm extracted into `calcRanges()` function, called via `request.security()` with configurable `htfInput` (default "60"). All `bar_index` references inside the function converted to `time[]`. Drawings use `xloc.bar_time` so 1hr range boxes/midline/labels persist on 5m and 1m charts. Break deduplication prevents repeated drawings from forward-filled HTF data. Fractal markers gated to chart TF >= analysis TF. `log.info()` instrumentation removed. Info table shows analysis TF. User confirmed working on 5m chart. Live in this repo.
+16. **v15-pending-breaks (fractal lag fix)**: Added `pendingLLBreak`/`pendingHHBreak` flags to handle 2-bar fractal detection lag. Problem: 5-bar fractals are detected 2 bars after they form. When price breaks an LL before the opposing LH fractal is confirmed, the continuation can't fire (no `candidate_LH_p`). Fix: set a pending flag on the deferred break, then fire it retroactively when the LH/HL fractal is finally detected, using the existing `fractalFiredBreak` infrastructure. The retroactive fire happens inside the `isLH`/`isHL` detection blocks — if `pendingLLBreak`/`pendingHHBreak` is true, the continuation fires immediately using the newly-detected fractal as the range bound. Flags are cleared on all 5 break paths. Also fixed box right edge to end 1 candle after break instead of extending indefinitely. Verified on US500: bear range correctly shows [7325.8, 7358.5] (was [7389.9, 7325.8] without fix), then flips to BULLISH [7322.9, 7358.5]. Live in this repo.
 
 ## Other things we discovered
 
@@ -162,7 +165,7 @@ We went through these incarnations:
 
 6. **Possible refinement: fractal filter**: Consider whether a longer-period fractal (7-bar or 9-bar) or ZigZag-style minimum-percent filter would reduce noise. Defer until after day-by-day walkthrough.
 
-7. **Original PRD mechanics not implemented**: The user's chart annotation references additional rules (mitigate 50% / HT FVG / AOI, internal sweep, IFVG 1m, CISD, BE @ 1.5R). The user explicitly said *"lets just trade the 1hr trend, not the 1m"* so these are deferred. Document only — don't build until requested.
+7. **1m entry model — DOCUMENTED, BUILD LATER**: User confirmed the full 1m execution model (see "1m Entry Model" section below). Build once 1hr range detection is calibrated.
 
 ## How to resume next session
 
@@ -173,6 +176,39 @@ We went through these incarnations:
 5. Begin day-by-day walkthrough: user marks which fractals are structural vs internal at each step, code gets calibrated to match.
 6. Consider reducing drawing limits or adding lookback pruning if chart rendering is problematic.
 7. Update `strategy.pine` to match v14-MTF indicator logic once indicator is user-approved.
+
+## 1m Entry Model (deferred — build after range detection is calibrated)
+
+User-confirmed rules for the execution layer. Runs on 1m within the 1hr bias.
+
+### Prerequisites
+- 1hr Range Detector shows active bias (BULLISH or BEARISH)
+- 50% level of the active 1hr range is known
+
+### Entry sequence (state machine — each step gates the next)
+
+**For BULL bias (long entries):**
+
+1. **Mitigate the 50%** — on 1m, price pulls back down to the 50% level of the 1hr range
+2. **FVG created** — the sell-off through/near the 50% is impulsive enough to create a bearish Fair Value Gap on 1m (3-candle pattern: candle[2].low > candle[0].high, middle candle is the displacement)
+3. **Internal sweep** — price sweeps below the 50% mitigation, taking out liquidity beneath it
+4. **IFVG (Inverse FVG)** — price reverses back up through the bearish FVG, inverting it. The FVG zone now acts as support. This is the same gap from step 2, just filled from the other side.
+5. **CISD (Change in State of Delivery)** — forceful directional change on 1m confirming the reversal. Not just a candle close — a displacement move in the trend direction.
+6. **Entry** — at CISD confirmation
+7. **SL** — below the sweep low (the lowest point from step 3)
+8. **TP** — 2.5R from entry
+9. **B/E** — move stop to entry when trade reaches 1.5R
+
+**For BEAR bias (short entries):** mirror of above — price rallies to 50%, creates bullish FVG, sweeps above, IFVG inverts it, CISD confirms bearish reversal.
+
+### Key concept clarifications
+- **FVG**: Fair Value Gap — 3-candle pattern where the middle candle is so impulsive that candles 1 and 3 don't overlap, leaving a gap
+- **IFVG**: Inverse Fair Value Gap — when price fills a FVG from the opposite direction, the gap zone flips from resistance to support (or vice versa)
+- **CISD**: Change in State of Delivery — a forceful/impulsive move confirming the new direction (displacement candle, not just a close)
+- **Internal sweep**: price briefly takes out stops/liquidity beyond a key level before reversing
+
+### Reference trade
+NAS100 1m, ~May 7 2026. Bull bias on 1hr [28545.90, 28703.60], 50% at 28624.75. Price sold off below 50%, created bearish FVG, reversed back through it (IFVG), CISD confirmed long. Visible in chart screenshot `nas100-trade-highlighted.png`.
 
 ## Useful prompts the user has given
 

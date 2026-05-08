@@ -1,17 +1,15 @@
 //@version=6
-indicator("Range Detector", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+indicator("Range Detector", overlay=true, max_boxes_count=500, max_lines_count=500)
 
 htfInput    = input.timeframe("60", "Analysis Timeframe", tooltip="Timeframe for structural analysis. Must be >= chart timeframe.")
-minPivotPct = input.float(0.20, "Min HH/LL Threshold %", minval=0.0, step=0.01, tooltip="Fractal must exceed prior by this % to qualify as HH/LL. Below threshold → classified as LH/HL instead.")
+minPivotPct = input.float(0.0, "Min HH/LL Threshold %", minval=0.0, step=0.01, tooltip="Fractal must exceed prior by this % to qualify as HH/LL. Below threshold → classified as LH/HL instead.")
 showRefs    = input.bool(true, "Show ref markers")
 maxLB       = input.int(2000, "Max lookback bars", minval=50)
 
 cBullBgActive  = color.new(color.green,  80)
 cBearBgActive  = color.new(color.red,    80)
-cHistBg        = color.new(color.gray,   95)
 cBullEdge      = color.new(color.green,  20)
 cBearEdge      = color.new(color.red,    20)
-cHistEdge      = color.new(color.gray,   80)
 cMid           = color.new(color.orange, 20)
 cHistMid       = color.new(color.gray,   80)
 
@@ -44,19 +42,61 @@ calcRanges(float minPct) =>
     var float rLo    = na
     var int   rStartT = na
     var int   breakT  = na
+    var bool  pendingLLBreak = false
+    var bool  pendingHHBreak = false
+
+    // Per-bar temporaries for fractal-fired breaks
+    fractalFiredBreak = false
+    fractalBreakBias = 0
+    fractalRefL_p = float(na)
+    fractalRefL_t = int(na)
+    fractalRefH_p = float(na)
+    fractalRefH_t = int(na)
+    fractalStruct_p = float(na)
+    fractalStruct_t = int(na)
+    fractalRHi = float(na)
+    fractalRLo = float(na)
+    fractalRStartT = int(na)
+    fractalBreakT = int(na)
 
     if fh
         threshH = nz(lastFH_p) * minPct / 100
         isHH = not na(lastFH_p) and high[2] > lastFH_p + threshH
         isLH = not na(lastFH_p) and not isHH
         if isHH and bias != -1
+            // Deeper HH while we already have HH + candidate_HL → fire HH break now
+            if not na(current_HH_p) and not na(candidate_HL_p) and high[2] > current_HH_p
+                fractalFiredBreak := true
+                fractalBreakBias := 1
+                fractalRefL_p := candidate_HL_p
+                fractalRefL_t := candidate_HL_t
+                fractalStruct_p := current_HH_p
+                fractalStruct_t := current_HH_t
+                fractalRHi := current_HH_p
+                fractalRLo := candidate_HL_p
+                fractalRStartT := current_HH_t
+                fractalBreakT := time[2]
+                candidate_HL_p := na
+                candidate_HL_t := na
             current_HH_p := high[2]
             current_HH_t := time[2]
-            candidate_HL_p := na
-            candidate_HL_t := na
         if isLH and bias != 1
             candidate_LH_p := high[2]
             candidate_LH_t := time[2]
+            if pendingLLBreak and not na(current_LL_p)
+                fractalFiredBreak := true
+                fractalBreakBias := -1
+                fractalRefH_p := high[2]
+                fractalRefH_t := time[2]
+                fractalStruct_p := current_LL_p
+                fractalStruct_t := current_LL_t
+                fractalRHi := high[2]
+                fractalRLo := current_LL_p
+                fractalRStartT := current_LL_t
+                fractalBreakT := time
+                candidate_LH_p := na
+                candidate_LH_t := na
+                pendingLLBreak := false
         lastFH_p := high[2]
 
     if fl
@@ -64,19 +104,88 @@ calcRanges(float minPct) =>
         isLL = not na(lastFL_p) and low[2] < lastFL_p - threshL
         isHL = not na(lastFL_p) and not isLL
         if isLL and bias != 1
+            // Deeper LL while we already have LL + candidate_LH → fire LL break now
+            if not na(current_LL_p) and not na(candidate_LH_p) and low[2] < current_LL_p
+                fractalFiredBreak := true
+                fractalBreakBias := -1
+                fractalRefH_p := candidate_LH_p
+                fractalRefH_t := candidate_LH_t
+                fractalStruct_p := current_LL_p
+                fractalStruct_t := current_LL_t
+                fractalRHi := candidate_LH_p
+                fractalRLo := current_LL_p
+                fractalRStartT := current_LL_t
+                fractalBreakT := time[2]
+                candidate_LH_p := na
+                candidate_LH_t := na
             current_LL_p := low[2]
             current_LL_t := time[2]
-            candidate_LH_p := na
-            candidate_LH_t := na
         if isHL and bias != -1
             candidate_HL_p := low[2]
             candidate_HL_t := time[2]
+            if pendingHHBreak and not na(current_HH_p)
+                fractalFiredBreak := true
+                fractalBreakBias := 1
+                fractalRefL_p := low[2]
+                fractalRefL_t := time[2]
+                fractalStruct_p := current_HH_p
+                fractalStruct_t := current_HH_t
+                fractalRHi := current_HH_p
+                fractalRLo := low[2]
+                fractalRStartT := current_HH_t
+                fractalBreakT := time
+                candidate_HL_p := na
+                candidate_HL_t := na
+                pendingHHBreak := false
         lastFL_p := low[2]
 
     newBreak = false
 
+    // Fractal-fired break (deeper HH/LL detected with existing candidate)
+    if fractalFiredBreak
+        bias := fractalBreakBias
+        if fractalBreakBias == 1
+            refL_p := fractalRefL_p
+            refL_t := fractalRefL_t
+            structural_HH_p := fractalStruct_p
+            structural_HH_t := fractalStruct_t
+            refH_p := na
+            refH_t := na
+            structural_LL_p := na
+            structural_LL_t := na
+        else
+            refH_p := fractalRefH_p
+            refH_t := fractalRefH_t
+            structural_LL_p := fractalStruct_p
+            structural_LL_t := fractalStruct_t
+            refL_p := na
+            refL_t := na
+            structural_HH_p := na
+            structural_HH_t := na
+        rHi := fractalRHi
+        rLo := fractalRLo
+        rStartT := fractalRStartT
+        newBreak := true
+        breakT := fractalBreakT
+        pendingHHBreak := false
+        pendingLLBreak := false
+        // Only clear the opposite side — the fractal that fired this break
+        // already set current_HH/LL for the next potential continuation
+        if fractalBreakBias == 1
+            current_LL_p := na
+            current_LL_t := na
+        else
+            current_HH_p := na
+            current_HH_t := na
+
+    // Flag pending breaks when price breaks HH/LL but candidate fractal not yet confirmed
+    if not newBreak and (bias == 1 or bias == 0) and not na(current_HH_p) and high >= current_HH_p and na(candidate_HL_p)
+        pendingHHBreak := true
+    if not newBreak and (bias == -1 or bias == 0) and not na(current_LL_p) and low <= current_LL_p and na(candidate_LH_p)
+        pendingLLBreak := true
+
     // HH break — continuation in bull (or initial bias from neutral)
-    if (bias == 1 or bias == 0) and not na(current_HH_p) and high >= current_HH_p and not na(candidate_HL_p)
+    if not newBreak and (bias == 1 or bias == 0) and not na(current_HH_p) and high >= current_HH_p and not na(candidate_HL_p)
         bias := 1
         refL_p := candidate_HL_p
         refL_t := candidate_HL_t
@@ -87,6 +196,8 @@ calcRanges(float minPct) =>
         rStartT := current_HH_t
         newBreak := true
         breakT := time
+        pendingHHBreak := false
+        pendingLLBreak := false
         current_HH_p := na
         current_HH_t := na
         candidate_HL_p := na
@@ -108,6 +219,8 @@ calcRanges(float minPct) =>
         rStartT := current_LL_t
         newBreak := true
         breakT := time
+        pendingHHBreak := false
+        pendingLLBreak := false
         current_LL_p := na
         current_LL_t := na
         candidate_LH_p := na
@@ -125,6 +238,8 @@ calcRanges(float minPct) =>
         rStartT := refL_t
         newBreak := true
         breakT := time
+        pendingHHBreak := false
+        pendingLLBreak := false
         refH_p := math.max(rHi, high)
         refH_t := time
         refL_p := na
@@ -144,6 +259,8 @@ calcRanges(float minPct) =>
         rStartT := refH_t
         newBreak := true
         breakT := time
+        pendingHHBreak := false
+        pendingLLBreak := false
         refL_p := math.min(rLo, low)
         refL_t := time
         refH_p := na
@@ -170,26 +287,20 @@ if isNewBreak
     lastProcessedBreakTime := htfBreakTime
 
 // ── DRAWINGS (xloc.bar_time so HTF ranges persist on LTF charts) ──
-var box   rangeBox  = na
-var line  midLine   = na
-var label biasLabel = na
+var box  rangeBox = na
+var line midLine  = na
 
 if isNewBreak
     if not na(rangeBox)
-        box.set_bgcolor(rangeBox, cHistBg)
-        box.set_border_color(rangeBox, cHistEdge)
+        box.set_bgcolor(rangeBox, color.new(color.white, 100))
         box.set_border_width(rangeBox, 1)
     if not na(midLine)
         line.set_color(midLine, cHistMid)
     bg   = htfBias == 1 ? cBullBgActive : cBearBgActive
     edge = htfBias == 1 ? cBullEdge     : cBearEdge
-    rangeBox  := box.new(htfStartTime, htfHi, htfBreakTime, htfLo, border_color=edge, bgcolor=bg, border_width=2, xloc=xloc.bar_time)
-    midLine   := line.new(htfStartTime, htfMid, htfBreakTime, htfMid, color=cMid, style=line.style_dashed, width=2, xloc=xloc.bar_time)
-    txt    = htfBias == 1 ? "BUL" : "BER"
-    txtCol = htfBias == 1 ? color.green  : color.red
-    lblY   = htfBias == 1 ? htfLo : htfHi
-    lblSty = htfBias == 1 ? label.style_label_up : label.style_label_down
-    biasLabel := label.new(htfBreakTime, lblY, txt, color=txtCol, textcolor=color.white, style=lblSty, size=size.normal, xloc=xloc.bar_time)
+    boxRight = htfBreakTime + timeframe.in_seconds(htfInput) * 1000
+    rangeBox := box.new(htfStartTime, htfHi, boxRight, htfLo, border_color=edge, bgcolor=bg, border_width=2, xloc=xloc.bar_time)
+    midLine  := line.new(htfStartTime, htfMid, boxRight, htfMid, color=cMid, style=line.style_dashed, width=2, xloc=xloc.bar_time)
 
 // ── FRACTAL MARKERS (only when chart TF >= analysis TF) ──
 bool isChartTF = timeframe.in_seconds() >= timeframe.in_seconds(htfInput)
